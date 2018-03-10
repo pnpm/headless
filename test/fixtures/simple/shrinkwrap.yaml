@@ -1,0 +1,33 @@
+dependencies:
+  is-positive: 1.0.0
+devDependencies:
+  is-negative: 2.1.0
+optionalDependencies:
+  colors: 1.2.0
+packages:
+  /colors/1.2.0:
+    dev: false
+    engines:
+      node: '>=0.1.90'
+    optional: true
+    resolution:
+      integrity: sha512-lweugcX5nailCqZBttArTojZZpHGWhmFJX78KJHlxwhM8tLAy5QCgRgRxrubrksdvA+2Y3inWG5TToyyjL82BQ==
+  /is-negative/2.1.0:
+    dev: true
+    engines:
+      node: '>=0.10.0'
+    resolution:
+      integrity: sha1-8Nhjd6oVpkw0lh84rCqb4rQKEYc=
+  /is-positive/1.0.0:
+    dev: false
+    engines:
+      node: '>=0.10.0'
+    resolution:
+      integrity: sha1-iACYVrZKLx632LsBeUGEJK4EUss=
+registry: 'https://registry.npmjs.org/'
+shrinkwrapMinorVersion: 4
+shrinkwrapVersion: 3
+specifiers:
+  colors: 1.2.0
+  is-negative: ^2.1.0
+  is-positive: ^1.0.0

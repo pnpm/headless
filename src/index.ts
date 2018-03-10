@@ -1,30 +1,42 @@
-import {PackageFilesResponse} from '@pnpm/package-requester'
+import {
+  getCacheByEngine,
+  PackageFilesResponse,
+} from '@pnpm/package-requester'
 import dp = require('dependency-path')
 import pLimit = require('p-limit')
 import {StoreController} from 'package-store'
 import path = require('path')
 import {
+  PackageSnapshot,
   readWanted,
   Shrinkwrap,
-  PackageSnapshot,
 } from 'pnpm-shrinkwrap'
 import R = require('ramda')
+import linkBins, {linkPkgBins} from 'supi/lib/link/linkBins' // TODO: move to separate package
+import symlinkDir = require('symlink-dir')
 import depSnapshotToResolution from './depSnapshotToResolution'
 
+const ENGINE_NAME = `${process.platform}-${process.arch}-node-${process.version.split('.')[0]}`
+
 export default async (
-  pkgPath: string,
   opts: {
     development: boolean,
     optional: boolean,
+    prefix: string,
     production: boolean,
     independentLeaves: boolean,
+    storeController: StoreController,
+    verifyStoreIntegrity: boolean,
+    sideEffectsCache: boolean,
+    force: boolean,
+    storePath: string,
   },
 ) => {
-  if (typeof pkgPath !== 'string') {
-    throw new TypeError('pkgPath should be a string')
+  if (typeof opts.prefix !== 'string') {
+    throw new TypeError('opts.prefix should be a string')
   }
 
-  const wantedShrinkwrap = await readWanted(pkgPath, {ignoreIncompatible: false})
+  const wantedShrinkwrap = await readWanted(opts.prefix, {ignoreIncompatible: false})
 
   if (!wantedShrinkwrap) {
     throw new Error('Headless installation can be done only with a shrinkwrap.yaml file')
@@ -37,22 +49,28 @@ export default async (
   }
   const filteredShrinkwrap = filterShrinkwrap(wantedShrinkwrap, filterOpts)
 
+  const depGraph = await shrinkwrapToDepGraph(filteredShrinkwrap, opts)
+
   await Promise.all([
-    linkAllModules(newPkgs, depGraph, {optional: opts.optional}),
-    linkAllModules(existingWithUpdatedDeps, depGraph, {optional: opts.optional}),
-    linkAllPkgs(opts.storeController, newPkgs, opts),
+    linkAllModules(depGraph, {optional: opts.optional}),
+    linkAllPkgs(opts.storeController, R.values(depGraph), opts),
   ])
 
-  await linkAllBins(newPkgs, depGraph, {optional: opts.optional})
+  await linkAllBins(depGraph, {optional: opts.optional})
 }
 
-function shrinkwrapToDepGraph (
+async function shrinkwrapToDepGraph (
   shr: Shrinkwrap,
   opts: {
+    force: boolean,
     independentLeaves: boolean,
     storeController: StoreController,
+    storePath: string,
+    prefix: string,
+    verifyStoreIntegrity: boolean,
   },
 ) {
+  const nodeModules = path.join(opts.prefix, 'node_modules')
   const graph: DepGraphNodesByDepPath = {}
   if (shr.packages) {
     for (const relDepPath of R.keys(shr.packages)) {
@@ -60,16 +78,46 @@ function shrinkwrapToDepGraph (
       const depSnapshot = shr.packages[relDepPath]
       const independent = opts.independentLeaves && R.isEmpty(depSnapshot.dependencies) && R.isEmpty(depSnapshot.optionalDependencies)
       const resolution = depSnapshotToResolution(relDepPath, depSnapshot, shr.registry)
-      const pkgResponse = opts.storeController.requestPackage({}, {
-
+      // TODO: optimize. This info can be already returned by depSnapshotToResolution()
+      const pkgName = depSnapshot.name || dp.parse(relDepPath)['name'] // tslint:disable-line
+      const pkgId = depSnapshot.id || depPath
+      const fetchResponse = await opts.storeController.fetchPackage({
+        force: false,
+        pkgId,
+        prefix: opts.prefix,
+        resolution,
+        verifyStoreIntegrity: opts.verifyStoreIntegrity,
       })
+      const cacheByEngine = opts.force ? new Map() : await getCacheByEngine(opts.storePath, pkgId)
+      const centralLocation = cacheByEngine[ENGINE_NAME] || path.join(fetchResponse.inStoreLocation, 'node_modules', pkgName)
+
+      // TODO: make this work with local deps. Local deps have IDs that can be converted to location, only via `.${pkgIdToFilename(node.pkg.id)}`
+      const modules = path.join(nodeModules, `.${depPath}`, 'node_modules')
+      const peripheralLocation = !independent
+        ? path.join(modules, pkgName)
+        : centralLocation
       graph[depPath] = {
-        independent,
+        centralLocation,
+        children: getChildren(depSnapshot, shr.registry),
+        fetchingFiles: fetchResponse.fetchingFiles,
         hasBundledDependencies: !!depSnapshot.bundledDependencies,
+        independent,
+        modules,
+        optionalDependencies: new Set(R.keys(depSnapshot.optionalDependencies)),
+        peripheralLocation,
       }
     }
   }
   return graph
+}
+
+function getChildren (depSnapshot: PackageSnapshot, registry: string) {
+  const allDeps = Object.assign({}, depSnapshot.dependencies, depSnapshot.optionalDependencies)
+  return R.keys(allDeps)
+    .reduce((acc, alias) => {
+      acc[alias] = dp.refToAbsolute(allDeps[alias], alias, registry)
+      return acc
+    }, {})
 }
 
 export interface DepGraphNode {
@@ -135,14 +183,13 @@ async function linkAllPkgs (
 }
 
 async function linkAllBins (
-  depNodes: DepGraphNode[],
   depGraph: DepGraphNodesByDepPath,
   opts: {
     optional: boolean,
   },
 ) {
   return Promise.all(
-    depNodes.map((depNode) => limitLinking(async () => {
+    R.values(depGraph).map((depNode) => limitLinking(async () => {
       const binPath = path.join(depNode.peripheralLocation, 'node_modules', '.bin')
 
       const childrenToLink = opts.optional
@@ -172,14 +219,13 @@ async function linkAllBins (
 }
 
 async function linkAllModules (
-  depNodes: DepGraphNode[],
   depGraph: DepGraphNodesByDepPath,
   opts: {
     optional: boolean,
   },
 ) {
   return Promise.all(
-    depNodes
+    R.values(depGraph)
       .filter((depNode) => !depNode.independent)
       .map((depNode) => limitLinking(async () => {
         const childrenToLink = opts.optional
