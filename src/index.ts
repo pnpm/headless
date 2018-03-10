@@ -12,7 +12,10 @@ import {
   Shrinkwrap,
 } from 'pnpm-shrinkwrap'
 import R = require('ramda')
+import getPkgInfoFromShr from 'supi/lib/getPkgInfoFromShr'
 import linkBins, {linkPkgBins} from 'supi/lib/link/linkBins' // TODO: move to separate package
+import {rootLogger} from 'supi/lib/loggers'
+import logStatus from 'supi/lib/logging/logInstallStatus'
 import symlinkDir = require('symlink-dir')
 import depSnapshotToResolution from './depSnapshotToResolution'
 
@@ -57,6 +60,47 @@ export default async (
   ])
 
   await linkAllBins(depGraph, {optional: opts.optional})
+
+  const nodeModules = path.join(opts.prefix, 'node_modules')
+  const bin = path.join(opts.prefix, 'node_modules', '.bin')
+  await linkRootPackages(filteredShrinkwrap, depGraph, nodeModules)
+  await linkBins(nodeModules, bin)
+}
+
+async function linkRootPackages (
+  shr: Shrinkwrap,
+  depGraph: DepGraphNodesByDepPath,
+  baseNodeModules: string,
+) {
+  const allDeps = Object.assign({}, shr.devDependencies, shr.dependencies, shr.optionalDependencies)
+  return R.keys(allDeps)
+    .map(async (alias) => {
+      const depPath = dp.refToAbsolute(allDeps[alias], alias, shr.registry)
+      const depNode = depGraph[depPath]
+      await symlinkDependencyTo(alias, depNode, baseNodeModules)
+      const isDev = shr.devDependencies && shr.devDependencies[alias]
+      const isOptional = shr.optionalDependencies && shr.optionalDependencies[alias]
+
+      const relDepPath = dp.refToRelative(allDeps[alias], alias)
+      const depSnapshot = shr.packages && shr.packages[relDepPath]
+      if (!depSnapshot) return // this won't ever happen. Just making typescript happy
+      const pkgId = depSnapshot.id || depPath
+      const pkgInfo = getPkgInfoFromShr(relDepPath, depSnapshot)
+      rootLogger.info({
+        added: {
+          dependencyType: isDev && 'dev' || isOptional && 'optional' || 'prod',
+          id: pkgId,
+          // latest: opts.outdatedPkgs[pkg.id],
+          name: alias,
+          realName: pkgInfo.name,
+          version: pkgInfo.version,
+        },
+      })
+      logStatus({
+        pkgId,
+        status: 'installed',
+      })
+    })
 }
 
 async function shrinkwrapToDepGraph (
